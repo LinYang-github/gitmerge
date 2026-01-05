@@ -1,0 +1,5 @@
+{
+  "name": "GitMerge",
+  "description": "A developer tool to flatten GitHub repositories into a single text file.",
+  "requestFramePermissions": []
+}
