@@ -20,13 +20,6 @@ export interface ProcessedFile {
   size: number;
 }
 
-export interface ChatMessage {
-  id: string;
-  role: 'user' | 'model';
-  text: string;
-  timestamp: number;
-}
-
 export enum AppStatus {
   IDLE,
   FETCHING_TREE,
@@ -39,4 +32,6 @@ export enum AppStatus {
 export interface Settings {
   githubToken: string;
   ignoreExtensions: string[];
+  maxFileSize: number; // in bytes
+  removeComments: boolean;
 }

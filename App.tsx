@@ -1,10 +1,11 @@
 import React, { useState, useCallback } from 'react';
-import { Download, FileCode, CheckCircle, AlertCircle, X } from 'lucide-react';
+import { Download, FileCode, CheckCircle, AlertCircle, X, Copy, BrainCircuit, Layers, FileMinus } from 'lucide-react';
 import RepoForm from './components/RepoForm';
 import FileTree from './components/FileTree';
 import { RepoInfo, GitNode, AppStatus, Settings as AppSettings } from './types';
 import { fetchRepoDetails, fetchGitTree, fetchFileContent } from './services/githubService';
 import { DEFAULT_IGNORE_EXTENSIONS } from './constants';
+import { estimateTokens, generateAsciiTree, stripComments } from './utils/textUtils';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -13,13 +14,39 @@ const App: React.FC = () => {
   const [mergedContent, setMergedContent] = useState('');
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [error, setError] = useState<string | null>(null);
+  const [includeTree, setIncludeTree] = useState(true);
+  const [copySuccess, setCopySuccess] = useState(false);
   
   // Settings Modal State
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({
     githubToken: '',
-    ignoreExtensions: DEFAULT_IGNORE_EXTENSIONS
+    ignoreExtensions: DEFAULT_IGNORE_EXTENSIONS,
+    maxFileSize: 500 * 1024, // 500KB default
+    removeComments: false
   });
+  
+  // Temporary state for editing extensions in modal
+  const [tempExtensions, setTempExtensions] = useState('');
+
+  const handleOpenSettings = () => {
+      setTempExtensions(settings.ignoreExtensions.join(', '));
+      setShowSettings(true);
+  };
+
+  const handleSaveSettings = () => {
+      const exts = tempExtensions
+          .split(',')
+          .map(e => e.trim())
+          .filter(Boolean)
+          .map(e => e.startsWith('.') ? e : `.${e}`);
+      
+      setSettings(prev => ({
+          ...prev,
+          ignoreExtensions: exts
+      }));
+      setShowSettings(false);
+  };
 
   const handleRepoLoad = async (info: RepoInfo) => {
     setStatus(AppStatus.FETCHING_TREE);
@@ -36,17 +63,24 @@ const App: React.FC = () => {
         setRepoInfo({ ...info, branch });
       }
 
-      // 2. Get Tree (latest commit SHA of branch usually works for tree fetch, or branch name directly)
+      // 2. Get Tree
       const tree = await fetchGitTree(info.owner, info.repo, branch, settings.githubToken);
 
       // 3. Filter files
       const textFiles = tree.filter(node => {
         if (node.type !== 'blob') return false;
+        
+        // Filter by size
+        if (node.size && node.size > settings.maxFileSize) return false;
+
         const ext = node.path.slice(node.path.lastIndexOf('.')).toLowerCase();
+        
         // Check exact ignored extensions
         if (settings.ignoreExtensions.includes(ext)) return false;
-        // Check for specific ignored files/folders (naive)
+        
+        // Check for specific ignored files/folders
         if (node.path.includes('.git/') || node.path.includes('node_modules/') || node.path.includes('package-lock.json') || node.path.includes('yarn.lock')) return false;
+        
         return true;
       }).map(node => ({ ...node, selected: true }));
 
@@ -73,6 +107,7 @@ const App: React.FC = () => {
     setStatus(AppStatus.FETCHING_CONTENT);
     setProgress({ current: 0, total: selectedFiles.length });
     setError(null);
+    setCopySuccess(false);
 
     const CONCURRENCY_LIMIT = 5;
     let completed = 0;
@@ -84,7 +119,13 @@ const App: React.FC = () => {
         const chunk = selectedFiles.slice(i, i + CONCURRENCY_LIMIT);
         const chunkPromises = chunk.map(async (file) => {
             try {
-                const content = await fetchFileContent(file.url, settings.githubToken);
+                let content = await fetchFileContent(file.url, settings.githubToken);
+                
+                // Post-processing: Strip comments
+                if (settings.removeComments) {
+                    content = stripComments(content, file.path);
+                }
+                
                 return { path: file.path, content };
             } catch (e) {
                 return { path: file.path, content: `[Error fetching content: ${(e as Error).message}]` };
@@ -98,7 +139,14 @@ const App: React.FC = () => {
       }
 
       // Build the final string
-      const fullText = results.map(r => {
+      let fullText = '';
+
+      // Optional: Add Directory Tree
+      if (includeTree) {
+        fullText += generateAsciiTree(selectedFiles.map(f => f.path));
+      }
+
+      fullText += results.map(r => {
         return `File: ${r.path}\n${'-'.repeat(50)}\n${r.content}\n${'-'.repeat(50)}\n`;
       }).join('\n');
 
@@ -119,6 +167,16 @@ const App: React.FC = () => {
     document.body.appendChild(element);
     element.click();
     document.body.removeChild(element);
+  };
+
+  const copyToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(mergedContent);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy text: ', err);
+    }
   };
 
   return (
@@ -151,7 +209,7 @@ const App: React.FC = () => {
              <RepoForm 
                 onLoad={handleRepoLoad} 
                 isLoading={status === AppStatus.FETCHING_TREE} 
-                onOpenSettings={() => setShowSettings(true)}
+                onOpenSettings={handleOpenSettings}
              />
         </section>
 
@@ -175,6 +233,42 @@ const App: React.FC = () => {
                         onToggleAll={handleToggleAll} 
                     />
                     
+                    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+                        {/* Include Tree Toggle */}
+                        <label className="flex items-center space-x-3 cursor-pointer group">
+                            <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${includeTree ? 'bg-blue-600 border-blue-600' : 'border-slate-600 group-hover:border-slate-500'}`}>
+                                {includeTree && <CheckCircle size={14} className="text-white" />}
+                            </div>
+                            <input 
+                                type="checkbox" 
+                                checked={includeTree} 
+                                onChange={(e) => setIncludeTree(e.target.checked)}
+                                className="hidden"
+                            />
+                            <div className="flex items-center text-sm text-slate-300 group-hover:text-white transition-colors">
+                                <Layers size={16} className="mr-2 text-slate-400" />
+                                Include Directory Tree
+                            </div>
+                        </label>
+
+                        {/* Remove Comments Toggle */}
+                        <label className="flex items-center space-x-3 cursor-pointer group">
+                            <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${settings.removeComments ? 'bg-blue-600 border-blue-600' : 'border-slate-600 group-hover:border-slate-500'}`}>
+                                {settings.removeComments && <CheckCircle size={14} className="text-white" />}
+                            </div>
+                            <input 
+                                type="checkbox" 
+                                checked={settings.removeComments} 
+                                onChange={(e) => setSettings(s => ({...s, removeComments: e.target.checked}))}
+                                className="hidden"
+                            />
+                            <div className="flex items-center text-sm text-slate-300 group-hover:text-white transition-colors">
+                                <FileMinus size={16} className="mr-2 text-slate-400" />
+                                Remove Code Comments <span className="text-xs text-blue-400 ml-1">(Save Tokens)</span>
+                            </div>
+                        </label>
+                    </div>
+
                     <button
                         onClick={handleMerge}
                         disabled={status === AppStatus.FETCHING_CONTENT}
@@ -201,22 +295,37 @@ const App: React.FC = () => {
                         <div className="space-y-6 animate-fadeIn">
                              {/* Stats & Actions */}
                              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col md:flex-row justify-between items-center gap-4">
-                                <div>
+                                <div className="space-y-1">
                                     <h3 className="text-lg font-semibold text-white flex items-center">
                                         <CheckCircle className="text-green-500 mr-2" size={20} />
                                         Merge Complete
                                     </h3>
-                                    <p className="text-slate-400 text-sm mt-1">
-                                        Total size: {(mergedContent.length / 1024).toFixed(2)} KB
-                                    </p>
+                                    <div className="flex space-x-4 text-sm text-slate-400">
+                                        <span>Size: {(mergedContent.length / 1024).toFixed(2)} KB</span>
+                                        <span className="flex items-center text-blue-400" title="Estimated tokens for LLM context">
+                                            <BrainCircuit size={14} className="mr-1" />
+                                            ~{estimateTokens(mergedContent).toLocaleString()} Tokens
+                                        </span>
+                                    </div>
                                 </div>
-                                <div className="flex space-x-3">
+                                <div className="flex space-x-3 w-full md:w-auto">
+                                    <button
+                                        onClick={copyToClipboard}
+                                        className={`flex-1 md:flex-none flex items-center justify-center space-x-2 px-6 py-3 rounded-lg shadow-lg transition-all font-medium border ${
+                                            copySuccess 
+                                            ? 'bg-green-600 border-green-600 text-white' 
+                                            : 'bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-200'
+                                        }`}
+                                    >
+                                        {copySuccess ? <CheckCircle size={20} /> : <Copy size={20} />}
+                                        <span>{copySuccess ? 'Copied!' : 'Copy'}</span>
+                                    </button>
                                     <button
                                         onClick={downloadTxt}
-                                        className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-lg shadow-lg hover:shadow-blue-500/20 transition-all font-medium"
+                                        className="flex-1 md:flex-none flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-lg shadow-lg hover:shadow-blue-500/20 transition-all font-medium border border-blue-600"
                                     >
                                         <Download size={20} />
-                                        <span>Download .txt</span>
+                                        <span>Download</span>
                                     </button>
                                 </div>
                              </div>
@@ -260,17 +369,19 @@ const App: React.FC = () => {
       {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-            <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-fadeIn">
-                <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+            <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fadeIn flex flex-col max-h-[90vh]">
+                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900 sticky top-0">
                     <h3 className="font-semibold text-white">Settings</h3>
                     <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-white">
                         <X size={20} />
                     </button>
                 </div>
-                <div className="p-6 space-y-4">
+                
+                <div className="p-6 space-y-6 overflow-y-auto">
+                    {/* Token */}
                     <div>
                         <label className="block text-sm font-medium text-slate-300 mb-2">
-                            GitHub Personal Access Token (Optional)
+                            GitHub Personal Access Token
                         </label>
                         <input 
                             type="password" 
@@ -280,17 +391,53 @@ const App: React.FC = () => {
                             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-blue-500 outline-none text-sm"
                         />
                         <p className="text-xs text-slate-500 mt-2">
-                            Add a token if you hit rate limits (60 req/hr) or need to access private repos.
-                            The token is not stored permanently.
+                            Optional. Increases API rate limits.
+                        </p>
+                    </div>
+
+                    <div className="border-t border-slate-800 pt-4"></div>
+
+                    {/* Max File Size */}
+                    <div>
+                        <label className="block text-sm font-medium text-slate-300 mb-2">
+                            Skip Files Larger Than (KB)
+                        </label>
+                        <input 
+                            type="number" 
+                            value={settings.maxFileSize / 1024}
+                            onChange={(e) => setSettings(prev => ({ ...prev, maxFileSize: Number(e.target.value) * 1024 }))}
+                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                        />
+                        <p className="text-xs text-slate-500 mt-2">
+                            Files larger than this will be automatically unchecked. Good for skipping lock files, binaries, or large datasets.
+                        </p>
+                    </div>
+
+                    <div className="border-t border-slate-800 pt-4"></div>
+
+                    {/* Ignore Extensions */}
+                    <div>
+                        <label className="block text-sm font-medium text-slate-300 mb-2">
+                            Ignored File Extensions (comma separated)
+                        </label>
+                        <textarea
+                            value={tempExtensions}
+                            onChange={(e) => setTempExtensions(e.target.value)}
+                            rows={6}
+                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white focus:ring-2 focus:ring-blue-500 outline-none text-sm font-mono"
+                        />
+                         <p className="text-xs text-slate-500 mt-2">
+                            Add extensions here to prevent them from showing up in the file list (e.g., .pdf, .exe, .svg).
                         </p>
                     </div>
                 </div>
-                <div className="p-4 bg-slate-800/50 flex justify-end">
+                
+                <div className="p-4 bg-slate-800/50 flex justify-end sticky bottom-0 border-t border-slate-800">
                     <button 
-                        onClick={() => setShowSettings(false)}
+                        onClick={handleSaveSettings}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium"
                     >
-                        Done
+                        Save Settings
                     </button>
                 </div>
             </div>
